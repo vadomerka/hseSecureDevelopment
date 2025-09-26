@@ -34,8 +34,6 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 
 _DB = {
     "Users": [
-        # {"id": 1, "name": "", "email": "", "password": ""},
-        # {"id": 2, "name": "", "email": "", "password": ""},
         User(id=1, name="1", email="email1", password="123"),
         User(id=2, name="2", email="email1", password="123"),
     ],
