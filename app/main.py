@@ -7,6 +7,11 @@ from app.Models.User import User, UserDTO
 app = FastAPI(title="Task Tracker", version="0.1.0")
 
 
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
 class ApiError(Exception):
     def __init__(self, code: str, message: str, status: int = 400):
         self.code = code

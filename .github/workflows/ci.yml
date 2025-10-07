@@ -24,10 +24,43 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r requirements-dev.txt
           pip install  pip-audit
+          pip install pytest-cov
 
-      - name: Run tests (pytest)
+      - name: Run tests (pytest) with coverage and durations (non-blocking)
         run: |
-          pytest -q --junitxml=pytest.xml || true
+          pytest -q --junitxml=pytest.xml --durations=10 \
+            --cov=app --cov-report=xml:coverage.xml --cov-report=term || true
+
+      - name: Generate simple test metrics from pytest.xml
+        run: |
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          pytest_xml = Path('pytest.xml')
+          metrics = {"collected": 0, "failures": 0, "errors": 0, "skipped": 0, "xfail": 0, "xpass": 0, "time": 0.0}
+          if pytest_xml.exists():
+              tree = ET.parse(pytest_xml)
+              root = tree.getroot()
+              # Pytest JUnit may use testsuite or multiple suites
+              suites = root.findall('testsuite') or [root]
+              for s in suites:
+                  metrics["collected"] += int(s.attrib.get('tests', 0))
+                  metrics["failures"] += int(s.attrib.get('failures', 0))
+                  metrics["errors"] += int(s.attrib.get('errors', 0))
+                  metrics["skipped"] += int(s.attrib.get('skipped', 0))
+                  metrics["time"] += float(s.attrib.get('time', 0.0) or 0.0)
+                  # xfail/xpass appear as testcase elements with skipped type="pytest.xfail"
+                  for tc in s.findall('testcase'):
+                      for sk in tc.findall('skipped'):
+                          msg = (sk.attrib.get('type') or '') + ' ' + (sk.attrib.get('message') or '')
+                          if 'xfail' in msg:
+                              metrics["xfail"] += 1
+                          elif 'xpass' in msg:
+                              metrics["xpass"] += 1
+          Path('metrics.json').write_text(__import__('json').dumps(metrics, indent=2))
+          print('Metrics written to metrics.json:', metrics)
+          PY
 
       - name: Security audit (pip-audit JSON)
         run: |
@@ -40,6 +73,8 @@ jobs:
           path: |
             pip-audit.json
             pytest.xml
+            coverage.xml
+            metrics.json
 
       - name: Lint & Format
         run: |
@@ -47,8 +82,8 @@ jobs:
           black --check .
           isort --check-only .
 
-      - name: Tests
-        run: pytest -q
+      - name: Tests (blocking)
+        run: pytest -q --durations=10 --cov=app --cov-report=term
 
       - name: Pre-commit (all files)
         run: pre-commit run --all-files
