@@ -5,9 +5,11 @@ from typing import Optional
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from sqlmodel import select
 
-from app.Models.Task import Task, TaskDTO
-from app.Models.User import User, UserDTO
+from .Database.db import SessionDep, init
+from .Models.Task import Task, TaskDTO
+from .Models.User import User, UserDTO
 
 app = FastAPI(title="Task Tracker", version="0.1.0")
 
@@ -16,7 +18,7 @@ app = FastAPI(title="Task Tracker", version="0.1.0")
 PROBLEM_CONTENT_TYPE = "application/problem+json"
 
 
-def _get_correlation_id(request: Request) -> str:
+def get_correlation_id(request: Request) -> str:
     header_val = request.headers.get("X-Correlation-ID")
     try:
         if header_val:
@@ -35,7 +37,7 @@ def problem_response(
     detail: Optional[str] = None,
     type_: str = "about:blank",
 ) -> JSONResponse:
-    correlation_id = _get_correlation_id(request)
+    correlation_id = get_correlation_id(request)
     body = {
         "type": type_,
         "title": title,
@@ -48,6 +50,11 @@ def problem_response(
     resp.headers["Content-Type"] = PROBLEM_CONTENT_TYPE
     resp.headers["X-Correlation-ID"] = correlation_id
     return resp
+
+
+@app.on_event("startup")
+def on_startup():
+    init()
 
 
 @app.get("/health")
@@ -96,59 +103,51 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     )
 
 
-_DB = {
-    "Users": [
-        User(id=1, name="1", email="email1", password="123"),
-        User(id=2, name="2", email="email1", password="123"),
-    ],
-    "Tasks": [
-        Task(id=1, title="Task 1", type="Task"),
-        Task(id=2, title="Task 2", type="Task"),
-    ],
-}
-
-
 @app.get("/users")
-def get_users():
+def get_users(session: SessionDep):
     # Admin view
-    return [x.to_json() for x in _DB["Users"]]
+    return [x.to_json() for x in session.exec(select(User)).all()]
 
 
 @app.get("/users/{user_id}")
-def get_user(user_id: int):
+def get_user(user_id: int, session: SessionDep):
     # Profile view
-    for it in _DB["Users"]:
-        if it.id == user_id:
-            return it.to_json()
-    raise ApiError(code="not_found", message="item not found", status=404)
+    res = session.get(User, user_id)
+    if res is None:
+        raise ApiError(code="not_found", message="item not found", status=404)
+    return res.to_json()
 
 
 @app.post("/users")
-def post_user(user_dto: UserDTO):
+def post_user(user_dto: UserDTO, session: SessionDep):
     try:
         res = User(name=user_dto.name, email=user_dto.email, password=user_dto.password)
-        _DB["Users"].append(res)
+
+        session.add(res)
+        session.commit()
+        session.refresh(res)
+
         return res.to_json()
     except Exception:
         raise ApiError(code="Bad Request", message="Argument exception", status=400)
 
 
 @app.get("/tasks")
-def get_tasks():
+def get_tasks(session: SessionDep):
     # Admin view
-    return [x.to_json() for x in _DB["Tasks"]]
+    return [x.to_json() for x in session.exec(select(Task)).all()]
 
 
 @app.get("/tasks/{task_id}")
-def get_task(task_id: int):
-    for it in _DB["Tasks"]:
-        if it.id == task_id:
-            return it.to_json()
-    raise ApiError(code="not_found", message="item not found", status=404)
+def get_task(task_id: int, session: SessionDep):
+    res = session.get(Task, task_id)
+    if res is None:
+        raise ApiError(code="not_found", message="item not found", status=404)
+    return res.to_json()
 
 
 @app.post("/tasks")
-def post_task(task_dto: TaskDTO):
+def post_task(task_dto: TaskDTO, session: SessionDep):
     try:
         res = Task(
             title=task_dto.title,
@@ -158,48 +157,54 @@ def post_task(task_dto: TaskDTO):
             priority=task_dto.priority,
             tag=task_dto.tag,
             due_at=task_dto.due_at,
+            started_at=task_dto.started_at,
         )
-        _DB["Tasks"].append(res)
+
+        session.add(res)
+        session.commit()
+        session.refresh(res)
+
         return res.to_json()
     except Exception:
         raise ApiError(code="bad_request", message="Argument exception", status=400)
 
 
 @app.put("/tasks/{task_id}")
-def put_task(task_id: int, task_dto: TaskDTO):
-    task = None
-    try:
-        for it in _DB["Tasks"]:
-            if it.id == task_id:
-                task = it
-    except Exception:
+def put_task(task_id: int, task_dto: TaskDTO, session: SessionDep):
+    task = session.get(Task, task_id)
+    if task is None:
         raise ApiError(code="not_found", message="item not found", status=404)
+
     try:
-        res = Task(
-            id=task.id,
-            title=task_dto.title,
-            description=task_dto.description,
-            type=task_dto.type,
-            status=task_dto.status,
-            priority=task_dto.priority,
-            tag=task_dto.tag,
-            due_at=task_dto.due_at,
-        )
-        for i in range(len(_DB["Tasks"])):
-            if _DB["Tasks"][i].id == task_id:
-                _DB["Tasks"][i] = res
-        return res.to_json()
-    except Exception:
+        task.title = task_dto.title
+        task.description = task_dto.description
+        task.type = task_dto.type
+        task.status = task_dto.status
+        task.priority = task_dto.priority
+        task.tag = task_dto.tag
+        task.due_at = task_dto.due_at
+        task.started_at = task_dto.started_at
+
+        session.add(task)
+        session.commit()
+        session.refresh(task)
+
+        return task.to_json()
+    except Exception as e:
+        print(e)
         raise ApiError(code="bad_request", message="Argument exception", status=400)
 
 
 @app.delete("/tasks/{task_id}")
-def delete_task(task_id: int):
-    for i in range(len(_DB["Tasks"])):
-        if _DB["Tasks"][i].id == task_id:
-            _DB["Tasks"].pop(i)
-            return {"status": "OK"}
-    raise ApiError(code="not_found", message="item not found", status=404)
+def delete_task(task_id: int, session: SessionDep):
+    res = session.get(Task, task_id)
+    if res is None:
+        raise ApiError(code="not_found", message="item not found", status=404)
+
+    session.delete(res)
+    session.commit()
+
+    return {"result": "success"}
 
 
 # --- Secure upload endpoint ---
@@ -207,25 +212,24 @@ UPLOAD_DIR = os.path.join(os.getcwd(), "uploads")
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024  # 2 MiB
 
 
-def _detect_mime_and_extension(data: bytes) -> Optional[tuple[str, str]]:
-    # Minimal magic-byte checks for PNG, JPEG, PDF
+def detect_mime_and_extension(data: bytes) -> Optional[tuple[str, str]]:
     if data.startswith(b"\x89PNG\r\n\x1a\n"):
-        return ("image/png", ".png")
+        return "image/png", ".png"
     if data.startswith(b"\xff\xd8\xff"):
-        return ("image/jpeg", ".jpg")
+        return "image/jpeg", ".jpg"
     if data.startswith(b"%PDF"):
-        return ("application/pdf", ".pdf")
+        return "application/pdf", ".pdf"
     return None
 
 
-def _ensure_upload_dir() -> None:
+def ensure_upload_dir() -> None:
     if not os.path.isdir(UPLOAD_DIR):
         os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
 @app.post("/upload")
 async def upload_file(request: Request, file: UploadFile = File(...)):
-    _ensure_upload_dir()
+    ensure_upload_dir()
 
     total_read = 0
     head = b""
@@ -256,7 +260,7 @@ async def upload_file(request: Request, file: UploadFile = File(...)):
             type_="https://example.com/problems/bad_request",
         )
 
-    sig = _detect_mime_and_extension(head)
+    sig = detect_mime_and_extension(head)
     if sig is None:
         return problem_response(
             request,
@@ -287,3 +291,9 @@ async def upload_file(request: Request, file: UploadFile = File(...)):
             f.write(c)
 
     return {"filename": safe_name, "size": total_read}
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=8000)
