@@ -28,7 +28,7 @@ jobs:
 
       - name: Run tests (pytest) with coverage and durations (non-blocking)
         run: |
-          pytest -q --junitxml=pytest.xml --durations=10 \
+          pytest tests/ -q --junitxml=pytest.xml --durations=10 \
             --cov=app --cov-report=xml:coverage.xml --cov-report=term || true
 
       - name: Generate simple test metrics from pytest.xml
