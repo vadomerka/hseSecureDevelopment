@@ -1,19 +1,19 @@
 from datetime import date, datetime
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, constr
 from sqlmodel import Field, SQLModel
 
 
 class TaskDTO(BaseModel):
-    title: str
-    description: str
-    type: str
-    status: str
-    priority: int
-    tag: str
-    due_at: datetime = Field(default=date.min)
-    started_at: datetime = Field(default=date.min)
+    title: constr(min_length=1, max_length=100)
+    description: constr(max_length=1000)
+    type: constr(max_length=50)
+    status: constr(max_length=50)
+    priority: int = Field(ge=0, le=5)
+    tag: constr(max_length=50)
+    due_at: datetime
+    started_at: datetime
 
 
 class Task(SQLModel, table=True):

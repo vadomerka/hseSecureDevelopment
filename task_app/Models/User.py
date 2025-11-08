@@ -1,13 +1,13 @@
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr, constr
 from sqlmodel import Field, SQLModel
 
 
 class UserDTO(BaseModel):
-    name: str
-    email: str
-    password: str
+    name: constr(min_length=1, max_length=100)
+    email: EmailStr
+    password: constr(min_length=8, max_length=128)
 
 
 class User(SQLModel, table=True):
@@ -21,5 +21,4 @@ class User(SQLModel, table=True):
             "id": self.id,
             "name": self.name,
             "email": self.email,
-            "password": self.password,
         }
