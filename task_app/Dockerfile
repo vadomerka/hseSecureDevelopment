@@ -1,24 +1,66 @@
+# Stage 1: Build stage - для установки зависимостей
+FROM python:3.10-slim as builder
 
-# Use an official Python runtime as a parent image
+# Установка системных зависимостей для сборки пакетов
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    postgresql-client \
+    && rm -rf /var/lib/apt/lists/*
+
+# Создание виртуального окружения
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Копирование только requirements файлов для оптимизации кэша
+WORKDIR /build
+COPY requirements.txt /build/
+
+# Установка зависимостей в виртуальное окружение
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Stage 2: Production stage - минимальный образ
 FROM python:3.10-slim
 
-# Set environment varibles
-ENV PYTHONDONTWRITEBYTECODE 1
-ENV PYTHONUNBUFFERED 1
+# Установка только runtime зависимостей
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
 
-# Set the working directory in docker
-WORKDIR /q
+# Копирование виртуального окружения из builder stage
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 
-# Copy the current directory contents into the container at /data_app
-COPY . /q/task_app
+# Создание non-root пользователя
+RUN groupadd -r appuser && useradd -r -g appuser -u 1000 appuser
 
-COPY requirements.txt /q
-COPY requirements-dev.txt /q
+# Установка переменных окружения
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONHASHSEED=random \
+    PYTHONPATH=/app
 
-#CMD ["dir"]
+# Создание рабочей директории
+WORKDIR /app
 
-# Install any needed packages specified in requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+# Копирование только необходимых файлов приложения
+COPY --chown=appuser:appuser . /app/task_app
 
-# Specify the command to run on container start
+# Создание директории для загруженных файлов с правильными правами
+RUN mkdir -p /app/uploads && \
+    chown -R appuser:appuser /app/uploads && \
+    chmod 755 /app/uploads
+
+# Переключение на non-root пользователя
+USER appuser
+
+# HEALTHCHECK для мониторинга состояния приложения
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()" || exit 1
+
+# Открытие порта
+EXPOSE 8000
+
+# Команда запуска приложения
 CMD ["uvicorn", "task_app.main:app", "--host", "0.0.0.0", "--port", "8000"]
