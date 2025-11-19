@@ -76,6 +76,7 @@ jobs:
         run: |
           pytest tests/ --junitxml=pytest-${{ matrix.os }}-${{ matrix.python-version }}.xml \
             --cov=task_app --cov-report=xml:coverage-${{ matrix.os }}-${{ matrix.python-version }}.xml \
+            --cov-report=html:coverage-html-${{ matrix.os }}-${{ matrix.python-version }} \
             --cov-report=term --durations=10
 
       - name: Generate metrics
@@ -124,6 +125,7 @@ jobs:
           path: |
             pytest-${{ matrix.os }}-${{ matrix.python-version }}.xml
             coverage-${{ matrix.os }}-${{ matrix.python-version }}.xml
+            coverage-html-${{ matrix.os }}-${{ matrix.python-version }}
             metrics.json
             pip-audit.json
 
@@ -151,17 +153,38 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r requirements-dev.txt
 
-      - name: Run Ruff
-        run: ruff check --output-format=github .
+      - name: Run lint & hooks suite
+        run: |
+          set -euo pipefail
+          {
+            echo "== Ruff ==";
+            ruff check --output-format=github .;
+            echo;
+            echo "== Black ==";
+            black --check .;
+            echo;
+            echo "== isort ==";
+            isort --check-only .;
+            echo;
+            echo "== Pre-commit ==";
+            pre-commit run --all-files;
+          } 2>&1 | tee lint-report.txt
 
-      - name: Check Black formatting
-        run: black --check .
+      - name: Upload lint artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-artifacts
+          path: lint-report.txt
 
-      - name: Check isort
-        run: isort --check-only .
-
-      - name: Pre-commit
-        run: pre-commit run --all-files
+      - name: Upload lint reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-logs
+          path: |
+            .ruff_cache/
+            .git/hooks/pre-commit*
 
   docker-build:
     name: Docker Build (cached)
@@ -189,9 +212,19 @@ jobs:
           file: ./task_app/Dockerfile
           push: false
           tags: local/task-app:ci
-          load: false
+          load: true
           cache-from: type=local,src=/tmp/.buildx-cache
           cache-to: type=local,dest=/tmp/.buildx-cache,mode=max
+
+      - name: Save Docker image artifact
+        run: docker save local/task-app:ci -o task-app-ci.tar
+
+      - name: Upload Docker image artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: task-app-ci.tar
 
   config-audit:
     name: Config audit (${{ matrix.env }})
