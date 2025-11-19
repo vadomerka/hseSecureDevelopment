@@ -5,9 +5,30 @@ services:
       - "8000:8000"
     environment:
       - DEBUG=False
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
     depends_on:
       db:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    security_opt:
+      - no-new-privileges:true
+      - seccomp:./seccomp-profile.json
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=100m
+      - /var/tmp:noexec,nosuid,size=100m
+    volumes:
+      - uploads:/app/uploads:rw
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    restart: unless-stopped
   db:
     container_name: task_db
     image: postgres:latest
@@ -26,6 +47,7 @@ services:
       retries: 5
 volumes:
   postgres_data:
+  uploads:
 
 #  pgadmin:
 #      image: dpage/pgadmin4:9.8
