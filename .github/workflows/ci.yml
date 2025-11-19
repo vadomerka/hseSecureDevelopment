@@ -1,18 +1,157 @@
 name: CI
+
 on:
   pull_request:
   push:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment for manual deploy"
+        required: true
+        default: "staging"
+        type: choice
+        options:
+          - staging
+          - production
+
+defaults:
+  run:
+    shell: bash
+
 permissions:
   contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  build:
+  tests:
+    name: Tests (py${{ matrix.python-version }} on ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    env:
+      APP_ENV: dev
+      DB_URL: ${{ secrets.DEV_DB_URL }}
+      JWT_SECRET: ${{ secrets.DEV_JWT_SECRET }}
+      API_BASE_URL: ${{ vars.DEV_API_BASE_URL }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache pip (dependencies + lock files)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt', 'requirements-dev.txt', 'pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+          pip install pytest-cov
+
+      - name: Configure runtime secrets (dev)
+        run: |
+          set -euo pipefail
+          DB_URL_VALUE="${DB_URL:-sqlite:///test.db}"
+          JWT_SECRET_VALUE="${JWT_SECRET:-insecure-dev-secret}"
+          echo "::add-mask::$DB_URL_VALUE"
+          echo "::add-mask::$JWT_SECRET_VALUE"
+          export DB_URL="$DB_URL_VALUE"
+          export JWT_SECRET="$JWT_SECRET_VALUE"
+          echo "APP_ENV=$APP_ENV"
+          echo "API_BASE_URL=${API_BASE_URL:-not-set}"
+          echo "DB URL configured: $([ -n \"$DB_URL\" ] && echo true || echo false)"
+          echo "JWT secret configured: $([ -n \"$JWT_SECRET\" ] && echo true || echo false)"
+
+      - name: Install pip-audit
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11'
+        run: pip install pip-audit
+
+      - name: Run pytest with coverage
+        run: |
+          pytest tests/ --junitxml=pytest-${{ matrix.os }}-${{ matrix.python-version }}.xml \
+            --cov=task_app --cov-report=xml:coverage-${{ matrix.os }}-${{ matrix.python-version }}.xml \
+            --cov-report=html:coverage-html-${{ matrix.os }}-${{ matrix.python-version }} \
+            --cov-report=term --durations=10
+
+      - name: Generate metrics
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11'
+        env:
+          PYTEST_XML: pytest-${{ matrix.os }}-${{ matrix.python-version }}.xml
+        run: |
+          python - <<'PY'
+          import json
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+          import os
+
+          pytest_xml = Path(os.environ["PYTEST_XML"])
+          metrics = {"collected": 0, "failures": 0, "errors": 0, "skipped": 0, "xfail": 0, "xpass": 0, "time": 0.0}
+          if pytest_xml.exists():
+              tree = ET.parse(pytest_xml)
+              root = tree.getroot()
+              suites = root.findall('testsuite') or [root]
+              for s in suites:
+                  metrics["collected"] += int(s.attrib.get('tests', 0))
+                  metrics["failures"] += int(s.attrib.get('failures', 0))
+                  metrics["errors"] += int(s.attrib.get('errors', 0))
+                  metrics["skipped"] += int(s.attrib.get('skipped', 0))
+                  metrics["time"] += float(s.attrib.get('time', 0.0) or 0.0)
+                  for tc in s.findall('testcase'):
+                      for sk in tc.findall('skipped'):
+                          msg = (sk.attrib.get('type') or '') + ' ' + (sk.attrib.get('message') or '')
+                          if 'xfail' in msg:
+                              metrics["xfail"] += 1
+                          elif 'xpass' in msg:
+                              metrics["xpass"] += 1
+          Path('metrics.json').write_text(json.dumps(metrics, indent=2))
+          print('Metrics written to metrics.json:', metrics)
+          PY
+
+      - name: Security audit
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11'
+        run: pip-audit -f json -o pip-audit.json || true
+
+      - name: Upload artifacts (primary combo)
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-artifacts
+          path: |
+            pytest-${{ matrix.os }}-${{ matrix.python-version }}.xml
+            coverage-${{ matrix.os }}-${{ matrix.python-version }}.xml
+            coverage-html-${{ matrix.os }}-${{ matrix.python-version }}
+            metrics.json
+            pip-audit.json
+
+  lint:
+    name: Lint & Format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Cache pip (dependencies + lock files)
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: lint-${{ runner.os }}-pip-${{ hashFiles('requirements.txt', 'requirements-dev.txt', 'pyproject.toml') }}
+          restore-keys: |
+            lint-${{ runner.os }}-pip-
 
       - uses: actions/setup-python@v5
         with:
@@ -23,67 +162,207 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r requirements-dev.txt
-          pip install pip-audit
-          pip install pytest-cov
 
-      - name: Run tests (pytest) with coverage and durations (non-blocking)
+      - name: Run lint & hooks suite
         run: |
-          pytest tests/ -q --junitxml=pytest.xml --durations=10 \
-            --cov=app --cov-report=xml:coverage.xml --cov-report=term || true
+          set -euo pipefail
+          {
+            echo "== Ruff ==";
+            ruff check --output-format=github .;
+            echo;
+            echo "== Black ==";
+            black --check .;
+            echo;
+            echo "== isort ==";
+            isort --check-only .;
+            echo;
+            echo "== Pre-commit ==";
+            pre-commit run --all-files;
+          } 2>&1 | tee lint-report.txt
 
-      - name: Generate simple test metrics from pytest.xml
+      - name: Upload lint artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-artifacts
+          path: lint-report.txt
+
+      - name: Upload lint reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-logs
+          path: |
+            .ruff_cache/
+            .git/hooks/pre-commit*
+
+  docker-build:
+    name: Docker Build (cached)
+    needs: [tests, lint]
+    runs-on: ubuntu-latest
+    if: github.actor != 'nektos/act'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+
+      - name: Build image with cached layers
+        uses: docker/build-push-action@v5
+        with:
+          context: ./task_app
+          file: ./task_app/Dockerfile
+          push: false
+          tags: local/task-app:ci
+          load: true
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache,mode=max
+
+      - name: Save Docker image artifact
+        run: docker save local/task-app:ci -o task-app-ci.tar
+
+      - name: Upload Docker image artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: task-app-ci.tar
+
+  deploy-staging:
+    name: Deploy to staging (dry-run)
+    needs: [docker-build]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/develop' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'staging')
+    environment:
+      name: staging
+      url: https://staging.example.com
+    steps:
+      - name: Download docker artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+          path: artifacts
+
+      - name: Load docker image
         run: |
-          python - <<'PY'
-          import xml.etree.ElementTree as ET
-          from pathlib import Path
+          docker load -i artifacts/task-app-ci.tar
+          docker images local/task-app:ci
 
-          pytest_xml = Path('pytest.xml')
-          metrics = {"collected": 0, "failures": 0, "errors": 0, "skipped": 0, "xfail": 0, "xpass": 0, "time": 0.0}
-          if pytest_xml.exists():
-              tree = ET.parse(pytest_xml)
-              root = tree.getroot()
-              # Pytest JUnit may use testsuite or multiple suites
-              suites = root.findall('testsuite') or [root]
-              for s in suites:
-                  metrics["collected"] += int(s.attrib.get('tests', 0))
-                  metrics["failures"] += int(s.attrib.get('failures', 0))
-                  metrics["errors"] += int(s.attrib.get('errors', 0))
-                  metrics["skipped"] += int(s.attrib.get('skipped', 0))
-                  metrics["time"] += float(s.attrib.get('time', 0.0) or 0.0)
-                  # xfail/xpass appear as testcase elements with skipped type="pytest.xfail"
-                  for tc in s.findall('testcase'):
-                      for sk in tc.findall('skipped'):
-                          msg = (sk.attrib.get('type') or '') + ' ' + (sk.attrib.get('message') or '')
-                          if 'xfail' in msg:
-                              metrics["xfail"] += 1
-                          elif 'xpass' in msg:
-                              metrics["xpass"] += 1
-          Path('metrics.json').write_text(__import__('json').dumps(metrics, indent=2))
-          print('Metrics written to metrics.json:', metrics)
-          PY
-
-      - name: Security audit (pip-audit JSON)
+      - name: Deploy (dry-run)
+        env:
+          STAGING_DB_URL: ${{ secrets.STAGING_DB_URL }}
+          STAGING_JWT_SECRET: ${{ secrets.STAGING_JWT_SECRET }}
+          STAGING_API_URL: ${{ vars.STAGING_API_BASE_URL }}
         run: |
-          pip-audit -f json -o pip-audit.json || true
+          echo "::add-mask::$STAGING_DB_URL"
+          echo "::add-mask::$STAGING_JWT_SECRET"
+          echo "Deploying docker image local/task-app:ci to staging namespace..."
+          echo "API URL: ${STAGING_API_URL:-not-set}"
+          echo "DB configured: $([ -n \"$STAGING_DB_URL\" ] && echo true || echo false)"
+          echo "JWT configured: $([ -n \"$STAGING_JWT_SECRET\" ] && echo true || echo false)"
+          echo "Simulating kubectl rollout..."
+          echo "kubectl set image deployment/task-app task-app=local/task-app:ci -n staging"
+          echo "Dry-run completed ✅"
 
-#      - name: Upload artifacts
-#        uses: actions/upload-artifact@v4
-#        with:
-#          name: ci-artifacts
-#          path: |
-#            pip-audit.json
-#            pytest.xml
-#            coverage.xml
-#            metrics.json
-
-      - name: Lint & Format
+      - name: Post-deploy smoke check (mock)
         run: |
-          ruff check --output-format=github .
-          black --check .
-          isort --check-only .
+          echo "curl --fail https://staging.example.com/health"
+          echo "Staging smoke test (mock) passed"
 
-      - name: Tests (blocking)
-        run: pytest -q --durations=10 --cov=app --cov-report=term
+  deploy-production:
+    name: Promote to production (approval)
+    needs: [deploy-staging]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'production')
+    environment:
+      name: production
+      url: https://app.example.com
+    steps:
+      - name: Download docker artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+          path: artifacts
 
-      - name: Pre-commit (all files)
-        run: pre-commit run --all-files
+      - name: Load docker image
+        run: |
+          docker load -i artifacts/task-app-ci.tar
+          docker images local/task-app:ci
+
+      - name: Promote (dry-run)
+        env:
+          PROD_DB_URL: ${{ secrets.PROD_DB_URL }}
+          PROD_JWT_SECRET: ${{ secrets.PROD_JWT_SECRET }}
+          PROD_API_URL: ${{ vars.PROD_API_BASE_URL }}
+        run: |
+          echo "::add-mask::$PROD_DB_URL"
+          echo "::add-mask::$PROD_JWT_SECRET"
+          echo "Promoting docker image local/task-app:ci to production cluster..."
+          echo "API URL: ${PROD_API_URL:-not-set}"
+          echo "DB configured: $([ -n \"$PROD_DB_URL\" ] && echo true || echo false)"
+          echo "JWT configured: $([ -n \"$PROD_JWT_SECRET\" ] && echo true || echo false)"
+          echo "Simulated helm upgrade..."
+          echo "helm upgrade --install task-app charts/task-app --set image.tag=ci"
+          echo "Production dry-run complete ✅"
+
+      - name: Production health probe (mock)
+        run: |
+          echo "curl --fail https://app.example.com/health"
+          echo "Production health probe (mock) passed"
+
+  config-audit:
+    name: Config audit (${{ matrix.env }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - env: dev
+            environment: dev
+            db_secret: DEV_DB_URL
+            jwt_secret: DEV_JWT_SECRET
+            api_var: DEV_API_BASE_URL
+          - env: staging
+            environment: staging
+            db_secret: STAGING_DB_URL
+            jwt_secret: STAGING_JWT_SECRET
+            api_var: STAGING_API_BASE_URL
+          - env: production
+            environment: production
+            db_secret: PROD_DB_URL
+            jwt_secret: PROD_JWT_SECRET
+            api_var: PROD_API_BASE_URL
+    environment: ${{ matrix.environment }}
+    steps:
+      - name: Summarize masked configuration
+        env:
+          TARGET_DB_URL: ${{ secrets[matrix.db_secret] }}
+          TARGET_JWT_SECRET: ${{ secrets[matrix.jwt_secret] }}
+          TARGET_API_URL: ${{ vars[matrix.api_var] }}
+        run: |
+          echo "Environment: ${{ matrix.env }}"
+          if [ -n "$TARGET_DB_URL" ]; then
+            echo "::add-mask::$TARGET_DB_URL"
+            echo "DB URL configured: true"
+          else
+            echo "DB URL configured: false"
+          fi
+          if [ -n "$TARGET_JWT_SECRET" ]; then
+            echo "::add-mask::$TARGET_JWT_SECRET"
+            echo "JWT secret configured: true"
+          else
+            echo "JWT secret configured: false"
+          fi
+          if [ -n "$TARGET_API_URL" ]; then
+            echo "API Base URL: $TARGET_API_URL"
+          else
+            echo "API Base URL: not set"
+          fi
