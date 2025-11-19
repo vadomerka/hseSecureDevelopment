@@ -19,6 +19,11 @@ jobs:
   tests:
     name: Tests (py${{ matrix.python-version }} on ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    env:
+      APP_ENV: dev
+      DB_URL: ${{ secrets.DEV_DB_URL }}
+      JWT_SECRET: ${{ secrets.DEV_JWT_SECRET }}
+      API_BASE_URL: ${{ vars.DEV_API_BASE_URL }}
     strategy:
       fail-fast: false
       matrix:
@@ -48,6 +53,20 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r requirements-dev.txt
           pip install pytest-cov
+
+      - name: Configure runtime secrets (dev)
+        run: |
+          set -euo pipefail
+          DB_URL_VALUE="${DB_URL:-sqlite:///test.db}"
+          JWT_SECRET_VALUE="${JWT_SECRET:-insecure-dev-secret}"
+          echo "::add-mask::$DB_URL_VALUE"
+          echo "::add-mask::$JWT_SECRET_VALUE"
+          export DB_URL="$DB_URL_VALUE"
+          export JWT_SECRET="$JWT_SECRET_VALUE"
+          echo "APP_ENV=$APP_ENV"
+          echo "API_BASE_URL=${API_BASE_URL:-not-set}"
+          echo "DB URL configured: $([ -n \"$DB_URL\" ] && echo true || echo false)"
+          echo "JWT secret configured: $([ -n \"$JWT_SECRET\" ] && echo true || echo false)"
 
       - name: Install pip-audit
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11'
@@ -173,3 +192,51 @@ jobs:
           load: false
           cache-from: type=local,src=/tmp/.buildx-cache
           cache-to: type=local,dest=/tmp/.buildx-cache,mode=max
+
+  config-audit:
+    name: Config audit (${{ matrix.env }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - env: dev
+            environment: dev
+            db_secret: DEV_DB_URL
+            jwt_secret: DEV_JWT_SECRET
+            api_var: DEV_API_BASE_URL
+          - env: staging
+            environment: staging
+            db_secret: STAGING_DB_URL
+            jwt_secret: STAGING_JWT_SECRET
+            api_var: STAGING_API_BASE_URL
+          - env: production
+            environment: production
+            db_secret: PROD_DB_URL
+            jwt_secret: PROD_JWT_SECRET
+            api_var: PROD_API_BASE_URL
+    environment: ${{ matrix.environment }}
+    steps:
+      - name: Summarize masked configuration
+        env:
+          TARGET_DB_URL: ${{ secrets[matrix.db_secret] }}
+          TARGET_JWT_SECRET: ${{ secrets[matrix.jwt_secret] }}
+          TARGET_API_URL: ${{ vars[matrix.api_var] }}
+        run: |
+          echo "Environment: ${{ matrix.env }}"
+          if [ -n "$TARGET_DB_URL" ]; then
+            echo "::add-mask::$TARGET_DB_URL"
+            echo "DB URL configured: true"
+          else
+            echo "DB URL configured: false"
+          fi
+          if [ -n "$TARGET_JWT_SECRET" ]; then
+            echo "::add-mask::$TARGET_JWT_SECRET"
+            echo "JWT secret configured: true"
+          else
+            echo "JWT secret configured: false"
+          fi
+          if [ -n "$TARGET_API_URL" ]; then
+            echo "API Base URL: $TARGET_API_URL"
+          else
+            echo "API Base URL: not set"
+          fi
