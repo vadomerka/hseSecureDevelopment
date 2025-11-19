@@ -3,6 +3,16 @@ name: CI
 on:
   pull_request:
   push:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment for manual deploy"
+        required: true
+        default: "staging"
+        type: choice
+        options:
+          - staging
+          - production
 
 defaults:
   run:
@@ -190,6 +200,7 @@ jobs:
     name: Docker Build (cached)
     needs: [tests, lint]
     runs-on: ubuntu-latest
+    if: github.actor != 'nektos/act'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -225,6 +236,88 @@ jobs:
         with:
           name: docker-image
           path: task-app-ci.tar
+
+  deploy-staging:
+    name: Deploy to staging (dry-run)
+    needs: [docker-build]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/develop' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'staging')
+    environment:
+      name: staging
+      url: https://staging.example.com
+    steps:
+      - name: Download docker artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+          path: artifacts
+
+      - name: Load docker image
+        run: |
+          docker load -i artifacts/task-app-ci.tar
+          docker images local/task-app:ci
+
+      - name: Deploy (dry-run)
+        env:
+          STAGING_DB_URL: ${{ secrets.STAGING_DB_URL }}
+          STAGING_JWT_SECRET: ${{ secrets.STAGING_JWT_SECRET }}
+          STAGING_API_URL: ${{ vars.STAGING_API_BASE_URL }}
+        run: |
+          echo "::add-mask::$STAGING_DB_URL"
+          echo "::add-mask::$STAGING_JWT_SECRET"
+          echo "Deploying docker image local/task-app:ci to staging namespace..."
+          echo "API URL: ${STAGING_API_URL:-not-set}"
+          echo "DB configured: $([ -n \"$STAGING_DB_URL\" ] && echo true || echo false)"
+          echo "JWT configured: $([ -n \"$STAGING_JWT_SECRET\" ] && echo true || echo false)"
+          echo "Simulating kubectl rollout..."
+          echo "kubectl set image deployment/task-app task-app=local/task-app:ci -n staging"
+          echo "Dry-run completed ✅"
+
+      - name: Post-deploy smoke check (mock)
+        run: |
+          echo "curl --fail https://staging.example.com/health"
+          echo "Staging smoke test (mock) passed"
+
+  deploy-production:
+    name: Promote to production (approval)
+    needs: [deploy-staging]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'production')
+    environment:
+      name: production
+      url: https://app.example.com
+    steps:
+      - name: Download docker artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+          path: artifacts
+
+      - name: Load docker image
+        run: |
+          docker load -i artifacts/task-app-ci.tar
+          docker images local/task-app:ci
+
+      - name: Promote (dry-run)
+        env:
+          PROD_DB_URL: ${{ secrets.PROD_DB_URL }}
+          PROD_JWT_SECRET: ${{ secrets.PROD_JWT_SECRET }}
+          PROD_API_URL: ${{ vars.PROD_API_BASE_URL }}
+        run: |
+          echo "::add-mask::$PROD_DB_URL"
+          echo "::add-mask::$PROD_JWT_SECRET"
+          echo "Promoting docker image local/task-app:ci to production cluster..."
+          echo "API URL: ${PROD_API_URL:-not-set}"
+          echo "DB configured: $([ -n \"$PROD_DB_URL\" ] && echo true || echo false)"
+          echo "JWT configured: $([ -n \"$PROD_JWT_SECRET\" ] && echo true || echo false)"
+          echo "Simulated helm upgrade..."
+          echo "helm upgrade --install task-app charts/task-app --set image.tag=ci"
+          echo "Production dry-run complete ✅"
+
+      - name: Production health probe (mock)
+        run: |
+          echo "curl --fail https://app.example.com/health"
+          echo "Production health probe (mock) passed"
 
   config-audit:
     name: Config audit (${{ matrix.env }})
