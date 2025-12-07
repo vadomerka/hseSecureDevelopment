@@ -1,0 +1,57 @@
+rules:
+  - id: py-unsafe-password-storage
+    languages: [python]
+    message: "Потенциально небезопасное хранение паролей - пароли должны хэшироваться перед сохранением"
+    severity: WARNING
+    patterns:
+      - pattern-either:
+          - pattern: |
+              password = $X
+          - pattern: |
+              self.password = $X
+          - pattern: |
+              $OBJ.password = $X
+    metadata:
+      category: security
+      cwe: "CWE-256: Plaintext Storage of a Password"
+      references:
+        - "https://owasp.org/www-community/vulnerabilities/Plaintext_Storage_of_Passwords"
+
+  - id: py-broad-exception-handling
+    languages: [python]
+    message: "Слишком широкий обработчик исключений - может скрывать важные ошибки"
+    severity: WARNING
+    patterns:
+      - pattern: |
+          except Exception:
+            ...
+    metadata:
+      category: reliability
+      cwe: "CWE-703: Improper Check or Handling of Exceptional Conditions"
+
+  - id: py-sql-injection-risk
+    languages: [python]
+    message: "Потенциальный риск SQL-инъекции - используйте параметризованные запросы"
+    severity: ERROR
+    patterns:
+      - pattern-either:
+          - pattern: |
+              execute(f"...{$X}...")
+          - pattern: |
+              exec(f"...{$X}...")
+    metadata:
+      category: security
+      cwe: "CWE-89: SQL Injection"
+      references:
+        - "https://owasp.org/www-community/attacks/SQL_Injection"
+
+  - id: py-unsafe-file-upload
+    languages: [python]
+    message: "Проверьте безопасность загрузки файлов - валидация типа и размера обязательна"
+    severity: INFO
+    patterns:
+      - pattern: |
+          UploadFile(...)
+    metadata:
+      category: security
+      cwe: "CWE-434: Unrestricted Upload of File with Dangerous Type"
