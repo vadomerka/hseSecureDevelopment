@@ -1,0 +1,2 @@
+# This directory will contain ZAP baseline reports after CI runs
+# Reports: zap_baseline.html, zap_baseline.json
