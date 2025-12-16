@@ -1,0 +1,29 @@
+# policy/waivers.yml — файл исключений для SBOM & SCA
+# См. project/69_sbom-vuln-mgmt.md для описания политики управления уязвимостями.
+#
+# Waiver — это временное исключение для конкретной уязвимости с обоснованием,
+# привязанное к Issue/PR и с указанием срока пересмотра.
+
+waivers: []
+
+# Пример структуры записи waiver:
+#
+# waivers:
+#   - id: "CVE-2024-XXXX"
+#     package: "example-lib"
+#     version: "1.2.3"
+#     severity: "High"
+#     reason: "Транзитивная зависимость; нет доступного фикса; компонент не используется в критическом пути."
+#     issue: "https://github.com/<org>/<repo>/issues/123"
+#     expires_at: "2025-12-31"
+#     approved_by: "tutor@example.org"
+#
+# Поля:
+#   - id: идентификатор уязвимости (CVE, GHSA и т.д.)
+#   - package: имя пакета/библиотеки
+#   - version: версия пакета
+#   - severity: уровень критичности (Critical, High, Medium, Low)
+#   - reason: обоснование исключения
+#   - issue: ссылка на Issue/PR с обсуждением
+#   - expires_at: дата пересмотра (YYYY-MM-DD)
+#   - approved_by: email/username утвердившего waiver
