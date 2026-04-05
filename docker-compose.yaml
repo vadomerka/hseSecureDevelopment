@@ -31,7 +31,7 @@ services:
     restart: unless-stopped
   db:
     container_name: task_db
-    image: postgres:16-alpine
+    image: postgres:latest
     ports:
       - 5432:5432
     volumes:
