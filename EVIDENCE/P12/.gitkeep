@@ -1,0 +1,2 @@
+# This directory will contain IaC & Container security reports after CI runs
+# Reports: hadolint_report.json, checkov_report.json, trivy_report.json

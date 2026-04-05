@@ -1,0 +1,11 @@
+# Конфигурация Trivy для проекта
+
+scan:
+  scanners:
+    - vuln
+    - config
+  severity:
+    - CRITICAL
+    - HIGH
+
+format: "json"
